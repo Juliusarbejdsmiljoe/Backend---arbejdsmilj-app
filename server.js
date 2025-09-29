@@ -1,6 +1,5 @@
 // server.js
-// Backend - arbejdsmiljø app
-// ESM ("type":"module"), Node >=20
+// Backend - arbejdsmiljø app (ESM, Node >=20)
 
 import 'dotenv/config'
 import express from 'express'
@@ -11,19 +10,13 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-// Middleware + routes
+// Routers & middleware
 import { requireAppToken } from './middleware/appToken.js'
-import healthRouter from './routes/health.js'
 import apvRouter from './routes/apv.js'
 import authRouter from './routes/auth.js'
 import uploadRouter from './routes/upload.js'
 
-// --- Build tag (så vi kan se i logs/svar at den NYE kode kører) ------------
-const BUILD_TAG =
-  process.env.RENDER_GIT_COMMIT?.slice(0, 7) ||
-  new Date().toISOString().replace(/[:.]/g, '-')
-
-// --- Paths / uploads-dir -----------------------------------------------------
+// --- Paths -------------------------------------------------------------------
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const uploadsDir = path.join(__dirname, 'uploads')
@@ -36,10 +29,12 @@ app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 
-// Statiske filer
+// Static files (PDF etc.)
 app.use('/uploads', express.static(uploadsDir, { maxAge: '1h', etag: true }))
 
-// --- DB (MongoDB Atlas via Mongoose) ----------------------------------------
+// --- Mongo / Mongoose --------------------------------------------------------
+const stateMap = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' }
+
 mongoose.connection.on('connected', () => {
   console.log('🟢 MongoDB connected:', mongoose.connection.host, 'db:', mongoose.connection.name)
 })
@@ -49,7 +44,6 @@ mongoose.connection.on('error', (err) => {
 mongoose.connection.on('disconnected', () => {
   console.warn('🟡 MongoDB disconnected')
 })
-app.locals.dbState = () => mongoose.connection.readyState // 0..3
 
 async function connectDB() {
   let uri = (process.env.MONGODB_URI || '').trim()
@@ -72,13 +66,53 @@ async function connectDB() {
   }
 }
 
-// --- Routes ------------------------------------------------------------------
+// --- PUBLIC HEALTH ENDPOINTS (direkte i serveren) ----------------------------
+function healthPayload() {
+  const rs = mongoose.connection.readyState
+  return {
+    ok: true,
+    ts: new Date().toISOString(),
+    db: stateMap[rs] ?? rs,
+    readyState: rs,
+    uptimeSec: Math.round(process.uptime()),
+    build: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'local',
+  }
+}
 
-// 🔓 Sundhed er OFFENTLIG (både /health og /api/health for kompatibilitet)
-app.use('/health', healthRouter)
-app.use('/api/health', healthRouter)
+// GET /health (offentlig)
+app.get('/health', (_req, res) => {
+  res.json(healthPayload())
+})
 
-// 🔒 Kræv X-App-Token på ALLE andre API-ruter
+// GET /health/mongo (offentlig) – ping direkte
+app.get('/health/mongo', async (_req, res) => {
+  try {
+    if (mongoose.connection.readyState !== 1) {
+      await mongoose.connection.asPromise()
+    }
+    await mongoose.connection.db.admin().command({ ping: 1 })
+    res.json({ ok: true, build: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'local' })
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) })
+  }
+})
+
+// Spejl dem også under /api/health for kompatibilitet
+app.get('/api/health', (_req, res) => res.json(healthPayload()))
+app.get('/api/health/mongo', async (_req, res) => {
+  try {
+    if (mongoose.connection.readyState !== 1) {
+      await mongoose.connection.asPromise()
+    }
+    await mongoose.connection.db.admin().command({ ping: 1 })
+    res.json({ ok: true, build: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'local' })
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) })
+  }
+})
+
+// --- Protected API -----------------------------------------------------------
+// Kræv X-App-Token på resten af /api/*
 app.use('/api', requireAppToken)
 
 // APV / Auth / Upload
@@ -99,17 +133,12 @@ app.use((err, req, res, _next) => {
 
 // --- Start -------------------------------------------------------------------
 const PORT = process.env.PORT || 10000
-
 ;(async () => {
   await connectDB()
   app.listen(PORT, () => {
-    const map = { 0: 'OFF', 1: 'ON', 2: 'CONNECTING', 3: 'DISCONNECTING' }
-    console.log(`🚀 Server lytter på :${PORT} (DB: ${map[app.locals.dbState()]})`)
+    console.log(`🚀 Server lytter på :${PORT}  (DB: ${stateMap[mongoose.connection.readyState]})`)
     const publicBase =
       process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`
     console.log('🌍 PUBLIC_BASE_URL =', publicBase)
-    console.log('🧩 BUILD_TAG =', BUILD_TAG)
   })
 })()
-
-export { BUILD_TAG }
