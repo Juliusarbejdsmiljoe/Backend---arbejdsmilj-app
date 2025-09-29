@@ -1,51 +1,50 @@
+// routes/upload.js
 import { Router } from 'express'
 import multer from 'multer'
 import path from 'node:path'
 import fs from 'node:fs'
-import { v4 as uuid } from 'uuid'
+import { fileURLToPath } from 'node:url'
+import User from '../models/User.js'
+import { optionalAuth, attachUser } from '../middleware/auth.js'
 
+const router = Router()
 
-const r = Router()
-
-
-const ensureDir = (dir) => { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }) }
-
+// Find uploads-mappe relativt til projektroden
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const uploadsDir = path.join(__dirname, '..', 'uploads')
+fs.mkdirSync(uploadsDir, { recursive: true })
 
 const storage = multer.diskStorage({
-destination: (req, file, cb) => {
-const dir = path.join(process.cwd(), 'uploads')
-ensureDir(dir)
-cb(null, dir)
-},
-filename: (_req, file, cb) => {
-const id = uuid().replace(/-/g, '')
-cb(null, `${id}${path.extname(file.originalname) || '.pdf'}`)
-}
+  destination: (_req, _file, cb) => cb(null, uploadsDir),
+  filename: async (req, file, cb) => {
+    const ext = path.extname(file.originalname || '.pdf') || '.pdf'
+    const base = path.basename(file.originalname || 'fil.pdf', ext).replace(/[^\w.-]+/g, '_')
+    let prefix = 'file'
+    if (req.user) {
+      // Inkludér bruger-kode i filnavn hvis brugeren er logget ind
+      prefix = req.user.code
+    }
+    const fname = `${prefix}-${Date.now()}-${base}${ext}`
+    cb(null, fname)
+  }
+})
+const upload = multer({ storage })
+
+router.post('/:type', optionalAuth, attachUser, upload.single('file'), async (req, res) => {
+  // type bruges kun til evt. kategorisering i fremtiden
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded (field name should be "file")' })
+
+  const base = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`
+  const downloadUrl = `${base}/uploads/${encodeURIComponent(req.file.filename)}`
+
+  const id = path.parse(req.file.filename).name
+  res.json({
+    message: 'Uploaded',
+    id,
+    name: req.file.filename,
+    downloadUrl
+  })
 })
 
-
-const upload = multer({
-storage,
-fileFilter: (_req, file, cb) => {
-if ((file.mimetype || '').includes('pdf')) cb(null, true)
-else cb(new Error('Kun PDF tilladt'))
-}
-})
-
-
-r.post('/:type', upload.single('file'), (req, res) => {
-const { type } = req.params
-if (!req.file) return res.status(400).json({ error: 'Ingen fil' })
-const base = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`
-const downloadUrl = `${base}/uploads/${req.file.filename}`
-return res.json({
-message: 'Uploaded',
-id: req.file.filename.split('.')[0],
-name: req.file.originalname,
-downloadUrl,
-type
-})
-})
-
-
-export default r
+export default router

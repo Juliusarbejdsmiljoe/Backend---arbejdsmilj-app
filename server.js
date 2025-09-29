@@ -37,8 +37,6 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 app.use('/uploads', express.static(uploadsDir, { maxAge: '1h', etag: true }))
 
 // --- DB (MongoDB Atlas via Mongoose) ----------------------------------------
-const { MONGODB_URI, MONGODB_DB } = process.env
-
 mongoose.connection.on('connected', () => {
   console.log('🟢 MongoDB connected:', mongoose.connection.host, 'db:', mongoose.connection.name)
 })
@@ -53,14 +51,22 @@ mongoose.connection.on('disconnected', () => {
 app.locals.dbState = () => mongoose.connection.readyState // 0..3
 
 async function connectDB() {
-  if (!MONGODB_URI) {
+  // Sanitér env og valider skema
+  let uri = (process.env.MONGODB_URI || '').trim()
+  if (uri.startsWith('MONGODB_URI=')) uri = uri.slice('MONGODB_URI='.length).trim()
+  if (!uri) {
     console.warn('⚠️  MONGODB_URI mangler – starter uden database.')
     return
   }
+  if (!/^mongodb(\+srv)?:\/\//.test(uri)) {
+    console.error('❌ MONGODB_URI har forkert format. Skal starte med "mongodb://" eller "mongodb+srv://".')
+    return
+  }
+
   try {
-    await mongoose.connect(MONGODB_URI, {
-      // Hvis du IKKE har sat db-navn i selve URI'en, sæt den her:
-      dbName: MONGODB_DB || 'arbejdsmiljoe',
+    await mongoose.connect(uri, {
+      // Brug env MONGODB_DB hvis db-navn ikke er i selve URI'en
+      dbName: process.env.MONGODB_DB || 'arbejdsmiljoe',
       serverSelectionTimeoutMS: 8000, // hurtigere fejlmeldinger
     })
   } catch (err) {
@@ -70,11 +76,12 @@ async function connectDB() {
 }
 
 // --- Routes ------------------------------------------------------------------
-// Kræv X-App-Token på ALLE API-ruter
-app.use('/api', requireAppToken)
 
-// Sundhed
+// Sundhed (GØRES OFFENTLIG, ingen token krævet)
 app.use('/api/health', healthRouter)
+
+// Kræv X-App-Token på ALLE ANDRE API-ruter
+app.use('/api', requireAppToken)
 
 // APV (start/stop → genererer PDF i /uploads)
 app.use('/api/apv', apvRouter)
@@ -106,7 +113,6 @@ const PORT = process.env.PORT || 10000
     const map = { 0: 'OFF', 1: 'ON', 2: 'CONNECTING', 3: 'DISCONNECTING' }
     console.log(`🚀 Server lytter på :${PORT}  (DB: ${map[app.locals.dbState()]})`)
 
-    // Brug Render's URL hvis den findes, ellers PUBLIC_BASE_URL, ellers lokal.
     const publicBase =
       process.env.RENDER_EXTERNAL_URL ||
       process.env.PUBLIC_BASE_URL ||
