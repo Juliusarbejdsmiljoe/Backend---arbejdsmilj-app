@@ -1,72 +1,80 @@
+// routes/apv.js
 import { Router } from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import PDFDocument from 'pdfkit'
-import { v4 as uuid } from 'uuid'
-import APVSession from '../models/APVSession.js'
 
+const router = Router()
+const uploadsDir = path.join(process.cwd(), 'uploads')
 
-const r = Router()
-
-
-function publicBase(req) {
-return process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`
+function baseUrlFrom(req) {
+  return process.env.PUBLIC_BASE_URL ||
+         `${req.protocol}://${req.get('host')}`
 }
 
+// simpel in-memory session store
+const sessions = new Map()
 
-r.post('/start', async (req, res) => {
-const { title = 'APV', questions = [] } = req.body || {}
-const sessionId = uuid().replace(/-/g, '')
-const publicUrl = `${publicBase(req)}/apv/s/${sessionId}`
-await APVSession.create({ sessionId, title, questions, publicUrl })
-return res.json({ sessionId, publicUrl })
+router.post('/start', (req, res) => {
+  const { title, questions } = req.body || {}
+  if (!title || !Array.isArray(questions)) {
+    return res.status(400).json({ error: 'title og questions kræves' })
+  }
+  const sessionId = crypto.randomBytes(8).toString('hex')
+  sessions.set(sessionId, { title, questions, startedAt: Date.now() })
+
+  // et link du kan vise i app’en (kan være en landingsside senere)
+  const publicUrl = `${baseUrlFrom(req)}/apv/${sessionId}`
+  res.json({ sessionId, publicUrl })
 })
 
+router.post('/stop', async (req, res) => {
+  const { sessionId } = req.body || {}
+  const s = sessionId && sessions.get(sessionId)
+  if (!s) return res.status(404).json({ error: 'Ukendt sessionId' })
 
-r.post('/stop', async (req, res) => {
-const { sessionId } = req.body || {}
-if (!sessionId) return res.status(400).json({ error: 'sessionId mangler' })
-const sess = await APVSession.findOne({ sessionId })
-if (!sess) return res.status(404).json({ error: 'Session ikke fundet' })
+  // sørg for uploads/
+  await fs.promises.mkdir(uploadsDir, { recursive: true })
 
+  // generér en simpel PDF med spørgsmålene
+  const fileName = `apv-${sessionId}.pdf`
+  const outPath = path.join(uploadsDir, fileName)
 
-// Generér simpel PDF (titel + liste over spørgsmål) – demo
-const uploads = path.join(process.cwd(), 'uploads')
-if (!fs.existsSync(uploads)) fs.mkdirSync(uploads, { recursive: true })
-const fileName = `apv-${sessionId}.pdf`
-const outPath = path.join(uploads, fileName)
-await new Promise((resolve, reject) => {
-const doc = new PDFDocument({ size: 'A4', margin: 36 })
-const stream = fs.createWriteStream(outPath)
-doc.pipe(stream)
-doc.fontSize(22).text(sess.title || 'APV', { underline: false })
-doc.moveDown()
-doc.fontSize(12).text(`Session: ${sessionId}`)
-doc.moveDown().fontSize(14).text('Spørgsmål:')
-doc.moveDown(0.5)
-;(sess.questions || []).slice(0, 200).forEach((q, i) => {
-doc.fontSize(12).text(`• ${q}`)
+  await new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 36 })
+      const stream = fs.createWriteStream(outPath)
+      doc.pipe(stream)
+
+      doc.fontSize(22).text(s.title || 'APV', { underline: false })
+      doc.moveDown(0.5)
+      doc.fontSize(12).fillColor('#444')
+        .text(`Dato: ${new Date().toLocaleString()}`)
+      doc.moveDown()
+
+      doc.fillColor('black').fontSize(14).text('Spørgsmål:', { underline: true })
+      doc.moveDown(0.3)
+      doc.fontSize(12)
+      s.questions.forEach((q, i) => {
+        doc.text(`${i + 1}. ${q}`)
+      })
+
+      doc.end()
+      stream.on('finish', resolve)
+      stream.on('error', reject)
+    } catch (e) {
+      reject(e)
+    }
+  })
+
+  // giv app’en en URL den kan downloade fra
+  const pdfUrl = `${baseUrlFrom(req)}/uploads/${fileName}`
+
+  // ryd op i memory-sessionen
+  sessions.delete(sessionId)
+
+  res.json({ pdfUrl })
 })
-doc.end()
-stream.on('finish', resolve)
-stream.on('error', reject)
-})
 
-
-sess.pdfPath = `/uploads/${fileName}`
-await sess.save()
-
-
-return res.json({ pdfUrl: `${publicBase(req)}${sess.pdfPath}` })
-})
-
-
-// (valgfri) meget enkel offentlig side – ikke påkrævet af iOS klienten
-r.get('/s/:sessionId', async (req, res) => {
-const s = await APVSession.findOne({ sessionId: req.params.sessionId })
-if (!s) return res.status(404).send('Session ikke fundet')
-res.send(`<h1>${s.title}</h1><p>APV session: ${s.sessionId}</p>`)
-})
-
-
-export default r
+export default router
