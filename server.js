@@ -1,4 +1,3 @@
-cat > server.js <<'EOF'
 // server.js
 // Backend - arbejdsmiljø app (ESM, Node >=20)
 
@@ -95,21 +94,6 @@ app.get('/health/mongo', async (_req, res) => {
   }
 })
 
-// Spejl dem også under /api/health for kompatibilitet
-app.get('/api/health', (_req, res) => {
-  const rs = mongoose.connection.readyState
-  res.json({ ok: true, ts: new Date().toISOString(), db: stateMap[rs] ?? rs })
-})
-app.get('/api/health/mongo', async (_req, res) => {
-  try {
-    if (mongoose.connection.readyState !== 1) await mongoose.connection.asPromise()
-    await mongoose.connection.db.admin().command({ ping: 1 })
-    res.json({ ok: true })
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || String(e) })
-  }
-})
-
 // --- Protected API -----------------------------------------------------------
 // Kræv X-App-Token på resten af /api/*
 app.use('/api', requireAppToken)
@@ -141,8 +125,3 @@ const PORT = process.env.PORT || 10000
     console.log('🌍 PUBLIC_BASE_URL =', publicBase)
   })
 })()
-EOF
-
-// Root sanity route
-app.get('/', (_req,res)=>res.send('OK — backend kører'))
-app.get('/health', (_req,res)=>{const m={0:'disconnected',1:'connected',2:'connecting',3:'disconnecting'};res.json({ok:true,ts:new Date().toISOString(),db:m[mongoose.connection.readyState]??mongoose.connection.readyState});})
