@@ -37,13 +37,13 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 app.use('/uploads', express.static(uploadsDir, { maxAge: '1h', etag: true }))
 
 // --- DB (MongoDB Atlas via Mongoose) ----------------------------------------
-const MONGODB_URI = process.env.MONGODB_URI
+const { MONGODB_URI, MONGODB_DB } = process.env
 
 mongoose.connection.on('connected', () => {
-  console.log('🟢 MongoDB connected:', mongoose.connection.host)
+  console.log('🟢 MongoDB connected:', mongoose.connection.host, 'db:', mongoose.connection.name)
 })
 mongoose.connection.on('error', (err) => {
-  console.error('🔴 MongoDB error:', err.message)
+  console.error('🔴 MongoDB error:', err?.message || err)
 })
 mongoose.connection.on('disconnected', () => {
   console.warn('🟡 MongoDB disconnected')
@@ -59,10 +59,12 @@ async function connectDB() {
   }
   try {
     await mongoose.connect(MONGODB_URI, {
+      // Hvis du IKKE har sat db-navn i selve URI'en, sæt den her:
+      dbName: MONGODB_DB || 'arbejdsmiljoe',
       serverSelectionTimeoutMS: 8000, // hurtigere fejlmeldinger
     })
   } catch (err) {
-    console.error('❌ MongoDB connect-fejl:', err.message)
+    console.error('❌ MongoDB connect-fejl:', err?.message || err)
     // Vi lader stadig serveren starte, så /api/health kan rammes
   }
 }
@@ -103,8 +105,13 @@ const PORT = process.env.PORT || 10000
   app.listen(PORT, () => {
     const map = { 0: 'OFF', 1: 'ON', 2: 'CONNECTING', 3: 'DISCONNECTING' }
     console.log(`🚀 Server lytter på :${PORT}  (DB: ${map[app.locals.dbState()]})`)
-    if (process.env.PUBLIC_BASE_URL) {
-      console.log('🌍 PUBLIC_BASE_URL =', process.env.PUBLIC_BASE_URL)
-    }
+
+    // Brug Render's URL hvis den findes, ellers PUBLIC_BASE_URL, ellers lokal.
+    const publicBase =
+      process.env.RENDER_EXTERNAL_URL ||
+      process.env.PUBLIC_BASE_URL ||
+      `http://localhost:${PORT}`
+
+    console.log('🌍 PUBLIC_BASE_URL =', publicBase)
   })
 })()
