@@ -1,3 +1,4 @@
+cat > server.js <<'EOF'
 // server.js
 // Backend - arbejdsmiljø app (ESM, Node >=20)
 
@@ -66,46 +67,44 @@ async function connectDB() {
   }
 }
 
-// --- PUBLIC HEALTH ENDPOINTS (direkte i serveren) ----------------------------
-function healthPayload() {
+// --- PUBLIC sanity routes (direkte i serveren) -------------------------------
+
+// Root (sanity-check)
+app.get('/', (_req, res) => res.send('OK — backend kører'))
+
+// /health (offentlig)
+app.get('/health', (_req, res) => {
   const rs = mongoose.connection.readyState
-  return {
+  res.json({
     ok: true,
     ts: new Date().toISOString(),
     db: stateMap[rs] ?? rs,
     readyState: rs,
     uptimeSec: Math.round(process.uptime()),
-    build: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'local',
-  }
-}
-
-// GET /health (offentlig)
-app.get('/health', (_req, res) => {
-  res.json(healthPayload())
+  })
 })
 
-// GET /health/mongo (offentlig) – ping direkte
+// /health/mongo (offentlig) – direkte ping
 app.get('/health/mongo', async (_req, res) => {
   try {
-    if (mongoose.connection.readyState !== 1) {
-      await mongoose.connection.asPromise()
-    }
+    if (mongoose.connection.readyState !== 1) await mongoose.connection.asPromise()
     await mongoose.connection.db.admin().command({ ping: 1 })
-    res.json({ ok: true, build: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'local' })
+    res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ ok: false, error: e?.message || String(e) })
   }
 })
 
 // Spejl dem også under /api/health for kompatibilitet
-app.get('/api/health', (_req, res) => res.json(healthPayload()))
+app.get('/api/health', (_req, res) => {
+  const rs = mongoose.connection.readyState
+  res.json({ ok: true, ts: new Date().toISOString(), db: stateMap[rs] ?? rs })
+})
 app.get('/api/health/mongo', async (_req, res) => {
   try {
-    if (mongoose.connection.readyState !== 1) {
-      await mongoose.connection.asPromise()
-    }
+    if (mongoose.connection.readyState !== 1) await mongoose.connection.asPromise()
     await mongoose.connection.db.admin().command({ ping: 1 })
-    res.json({ ok: true, build: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || 'local' })
+    res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ ok: false, error: e?.message || String(e) })
   }
@@ -142,3 +141,4 @@ const PORT = process.env.PORT || 10000
     console.log('🌍 PUBLIC_BASE_URL =', publicBase)
   })
 })()
+EOF
