@@ -142,3 +142,7 @@ const PORT = process.env.PORT || 10000
   })
 })()
 EOF
+
+// Root sanity route
+app.get('/', (_req,res)=>res.send('OK — backend kører'))
+app.get('/health', (_req,res)=>{const m={0:'disconnected',1:'connected',2:'connecting',3:'disconnecting'};res.json({ok:true,ts:new Date().toISOString(),db:m[mongoose.connection.readyState]??mongoose.connection.readyState});})
