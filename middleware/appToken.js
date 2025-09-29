@@ -1,7 +1,14 @@
 // middleware/appToken.js
 export function requireAppToken(req, res, next) {
-  // Tillad CORS preflight uden token
   if (req.method === 'OPTIONS') return next()
+
+  // Tillad health offentligt (både /health og /api/health)
+  const path = req.path || ''
+  const base = req.baseUrl || ''
+  const full = base + path
+  if (full.startsWith('/health') || full.startsWith('/api/health')) {
+    return next()
+  }
 
   const configured = (process.env.APP_UPLOAD_TOKEN || '')
     .split(',')
