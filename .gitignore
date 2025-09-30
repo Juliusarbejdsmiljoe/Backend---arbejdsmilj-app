@@ -4,3 +4,7 @@ uploads/
 .env.*
 !.env.example
 .DS_Store
+.env
+.env.*
+uploads/
+node_modules/
