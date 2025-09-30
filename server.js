@@ -1,5 +1,6 @@
 // server.js
-// Backend - arbejdsmiljø app (ESM, Node >=20)
+// Backend - arbejdsmiljø app
+// Kører med ESM ("type":"module") og Node 20+.
 
 import 'dotenv/config'
 import express from 'express'
@@ -10,105 +11,122 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-// Routers & middleware
+// Middleware + routes
 import { requireAppToken } from './middleware/appToken.js'
+import healthRouter from './routes/health.js'
 import apvRouter from './routes/apv.js'
 import authRouter from './routes/auth.js'
 import uploadRouter from './routes/upload.js'
+import reportsRouter from './routes/reports.js' // (cloud sync MVP)
 
-// --- Paths -------------------------------------------------------------------
+// --- Paths / uploads-dir -----------------------------------------------------
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+
 const uploadsDir = path.join(__dirname, 'uploads')
 fs.mkdirSync(uploadsDir, { recursive: true })
 
 // --- App ---------------------------------------------------------------------
 const app = express()
-app.set('trust proxy', 1)
-app.use(cors())
+app.set('trust proxy', 1) // Render / proxies
+
+app.use(cors()) // hvis du bruger cookies, skift til: cors({ origin: true, credentials: true })
 app.use(express.json({ limit: '10mb' }))
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'))
 
-// Static files (PDF etc.)
+// Statiske filer (PDF'er m.m.)
 app.use('/uploads', express.static(uploadsDir, { maxAge: '1h', etag: true }))
 
-// --- Mongo / Mongoose --------------------------------------------------------
-const stateMap = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' }
+// --- DB (MongoDB Atlas via Mongoose) ----------------------------------------
+const MONGODB_URI = process.env.MONGODB_URI
+const MONGODB_DB  = process.env.MONGODB_DB // valgfri (ellers bruger connection default db)
+
+/** Kort navne-map for mongoose.readyState */
+const stateMap = { 0: 'OFF', 1: 'ON', 2: 'CONNECTING', 3: 'DISCONNECTING' }
 
 mongoose.connection.on('connected', () => {
-  console.log('🟢 MongoDB connected:', mongoose.connection.host, 'db:', mongoose.connection.name)
+  console.log('🟢 MongoDB connected:', mongoose.connection.host)
 })
 mongoose.connection.on('error', (err) => {
-  console.error('🔴 MongoDB error:', err?.message || err)
+  console.error('🔴 MongoDB error:', err.message)
 })
 mongoose.connection.on('disconnected', () => {
   console.warn('🟡 MongoDB disconnected')
 })
 
+// Gør DB-state let tilgængelig for fx /api/health
+app.locals.dbState = () => mongoose.connection.readyState // 0..3
+
 async function connectDB() {
-  let uri = (process.env.MONGODB_URI || '').trim()
-  if (uri.startsWith('MONGODB_URI=')) uri = uri.slice('MONGODB_URI='.length).trim()
-  if (!uri) {
+  if (!MONGODB_URI) {
     console.warn('⚠️  MONGODB_URI mangler – starter uden database.')
     return
   }
-  if (!/^mongodb(\+srv)?:\/\//.test(uri)) {
-    console.error('❌ MONGODB_URI har forkert format (skal starte med "mongodb://" eller "mongodb+srv://").')
-    return
-  }
   try {
-    await mongoose.connect(uri, {
-      dbName: process.env.MONGODB_DB || 'arbejdsmiljoe',
+    await mongoose.connect(MONGODB_URI, {
+      dbName: MONGODB_DB || undefined,
       serverSelectionTimeoutMS: 8000,
     })
   } catch (err) {
-    console.error('❌ MongoDB connect-fejl:', err?.message || err)
+    console.error('❌ MongoDB connect-fejl:', err.message)
+    // Vi lader stadig serveren starte, så /health kan rammes
   }
 }
 
-// --- PUBLIC sanity routes (direkte i serveren) -------------------------------
+// --- Public routes (ingen X-App-Token) --------------------------------------
 
-// Root (sanity-check)
-app.get('/', (_req, res) => res.send('OK — backend kører'))
+// Ping root
+app.get('/', (_req, res) => {
+  res.type('text/plain').send('OK — backend kører')
+})
 
-// /health (offentlig)
+// Public health (til iOS warmup)
 app.get('/health', (_req, res) => {
   const rs = mongoose.connection.readyState
+  const buildRaw = (process.env.RENDER_GIT_COMMIT || process.env.VERCEL_GIT_COMMIT_SHA || process.env.BUILD || '').toString()
+  const build = buildRaw ? buildRaw.slice(0, 7) : undefined
   res.json({
     ok: true,
     ts: new Date().toISOString(),
-    db: stateMap[rs] ?? rs,
+    db: { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' }[rs] ?? rs,
     readyState: rs,
     uptimeSec: Math.round(process.uptime()),
+    ...(build ? { build } : {})
   })
 })
 
-// /health/mongo (offentlig) – direkte ping
-app.get('/health/mongo', async (_req, res) => {
-  try {
-    if (mongoose.connection.readyState !== 1) await mongoose.connection.asPromise()
-    await mongoose.connection.db.admin().command({ ping: 1 })
-    res.json({ ok: true })
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || String(e) })
-  }
-})
+// /api/health (JSON + ping) – holdes åben uden app-token
+app.use('/api/health', healthRouter)
 
-// --- Protected API -----------------------------------------------------------
-// Kræv X-App-Token på resten af /api/*
+// Public visning af APV-session (QR-link fra app’en).
+// Vi monterer apvRouter på /apv KUN for GET (så /apv/:sessionId virker),
+// men POST-ruter (/start, /stop) er IKKE tilgængelige her.
+app.use('/apv',
+  (req, res, next) => (req.method === 'GET' ? next() : res.status(404).send('Not found')),
+  apvRouter
+)
+
+// --- Beskyttede API-ruter (kræver X-App-Token) ------------------------------
 app.use('/api', requireAppToken)
 
-// APV / Auth / Upload
+// APV (start/stop → genererer PDF i /uploads)
 app.use('/api/apv', apvRouter)
+
+// Auth (login/register/me) – forventer Authorization: Bearer <JWT> inde i routeren
 app.use('/api/auth', authRouter)
+
+// Uploads (multipart/form-data) – fx POST /api/upload/apv  med felt "file"
 app.use('/api/upload', uploadRouter)
+
+// Cloud-rapporter (MVP-synk): POST/GET/DELETE
+app.use('/api/reports', reportsRouter)
 
 // 404 for ukendte API-ruter
 app.use('/api', (req, res) => {
   res.status(404).json({ error: 'Not found' })
 })
 
-// Global error handler
+// Global error handler (så vi altid svarer med JSON)
 app.use((err, req, res, _next) => {
   console.error('Unhandled error:', err)
   res.status(err.status || 500).json({ error: err.message || 'Server error' })
@@ -116,12 +134,15 @@ app.use((err, req, res, _next) => {
 
 // --- Start -------------------------------------------------------------------
 const PORT = process.env.PORT || 10000
+
 ;(async () => {
   await connectDB()
+
   app.listen(PORT, () => {
-    console.log(`🚀 Server lytter på :${PORT}  (DB: ${stateMap[mongoose.connection.readyState]})`)
-    const publicBase =
-      process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`
-    console.log('🌍 PUBLIC_BASE_URL =', publicBase)
+    const map = { 0: 'OFF', 1: 'ON', 2: 'CONNECTING', 3: 'DISCONNECTING' }
+    console.log(`🚀 Server lytter på :${PORT}  (DB: ${map[app.locals.dbState()]})`)
+    if (process.env.PUBLIC_BASE_URL) {
+      console.log('🌍 PUBLIC_BASE_URL =', process.env.PUBLIC_BASE_URL)
+    }
   })
 })()
